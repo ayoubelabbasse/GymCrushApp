@@ -1,6 +1,6 @@
 import React from 'react'
 import { View, Text, StyleSheet } from 'react-native'
-import { colors, radius, F } from '../constants/theme'
+import { colors, radius, F, lineHeightFor } from '../constants/theme'
 
 interface Props {
   icon: string
@@ -32,15 +32,18 @@ const styles = StyleSheet.create({
   },
   icon: {
     fontSize: 24,
+    lineHeight: lineHeightFor(24),
     marginBottom: 4,
   },
   value: {
     fontSize: 24,
+    lineHeight: lineHeightFor(24),
     fontFamily: F.extraBold,
     letterSpacing: -0.5,
   },
   label: {
     fontSize: 12,
+    lineHeight: lineHeightFor(12),
     fontFamily: F.semiBold,
     color: colors.muted,
     textAlign: 'center',

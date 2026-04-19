@@ -1,18 +1,21 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet,
+  View, Text, TextInput, TouchableOpacity, StyleSheet, Image,
   ScrollView, Alert, KeyboardAvoidingView, Platform, ActivityIndicator,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useRouter } from 'expo-router'
+import * as ImagePicker from 'expo-image-picker'
 import { supabase } from '../../lib/supabase'
 import GradientButton from '../../components/GradientButton'
 import PillTag from '../../components/PillTag'
-import Card from '../../components/Card'
 import {
   SPORTS, WORKOUT_STYLES, GOALS, VIBE_TAGS, TRAINING_EXPERIENCE,
 } from '../../constants/data'
-import { colors, spacing, radius, vibeTagColors, F } from '../../constants/theme'
+import { colors, spacing, radius, vibeTagColors, F, lineHeightFor } from '../../constants/theme'
+import { DEV_MODE } from '../../lib/devMode'
+import { getDevProfile, saveDevProfile } from '../../lib/devMockProfile'
+import type { Profile } from '../../lib/types'
 
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
@@ -63,6 +66,13 @@ export default function CreateProfileScreen() {
   const [step, setStep] = useState(1)
   const [loading, setLoading] = useState(false)
   const [bioLoading, setBioLoading] = useState(false)
+  // Edit mode: set when there's already a profile on this account.
+  // Controls whether submit is an UPSERT-update vs an INSERT, and the CTA copy.
+  const [existingProfileId, setExistingProfileId] = useState<string | null>(null)
+  const [existingSlug, setExistingSlug] = useState<string | null>(null)
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null)
+  const [photoLocalUri, setPhotoLocalUri] = useState<string | null>(null)
+  const [photoUploading, setPhotoUploading] = useState(false)
 
   // Step 1
   const [displayName, setDisplayName] = useState('')
@@ -73,6 +83,7 @@ export default function CreateProfileScreen() {
 
   // Step 2
   const [sport, setSport] = useState('')
+  const [sportQuery, setSportQuery] = useState('')
   const [workoutStyle, setWorkoutStyle] = useState('')
   const [goal, setGoal] = useState('')
   const [schedule, setSchedule] = useState<Schedule>({
@@ -84,6 +95,95 @@ export default function CreateProfileScreen() {
   const [bio, setBio] = useState('')
   const [vibeTags, setVibeTags] = useState<string[]>([])
   const [instagram, setInstagram] = useState('')
+
+  useEffect(() => { hydrateExistingProfile() }, [])
+
+  async function hydrateExistingProfile() {
+    try {
+      if (DEV_MODE) {
+        const p = await getDevProfile()
+        setExistingProfileId(p.id)
+        setExistingSlug(p.slug)
+        setDisplayName(p.display_name ?? '')
+        setAge(p.age != null ? String(p.age) : '')
+        setGender(p.gender ?? '')
+        setGymName(p.gym_name ?? '')
+        setExperience(p.training_experience ?? '')
+        setSport(p.sport ?? '')
+        setWorkoutStyle(p.workout_style ?? '')
+        setGoal(p.goal ?? '')
+        if (p.schedule) setSchedule(p.schedule)
+        setBio(p.bio ?? '')
+        setVibeTags(p.vibe_tags ?? [])
+        setInstagram(p.instagram ?? '')
+        setPhotoUrl(p.photo_url ?? null)
+        return
+      }
+
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) return
+      const { data: p } = await supabase
+        .from('profiles').select('*').eq('user_id', user.id).maybeSingle()
+      if (!p) return
+      setExistingProfileId(p.id)
+      setExistingSlug(p.slug)
+      setDisplayName(p.display_name ?? '')
+      setAge(p.age != null ? String(p.age) : '')
+      setGender(p.gender ?? '')
+      setGymName(p.gym_name ?? '')
+      setExperience(p.training_experience ?? '')
+      setSport(p.sport ?? '')
+      setWorkoutStyle(p.workout_style ?? '')
+      setGoal(p.goal ?? '')
+      if (p.schedule) setSchedule(p.schedule)
+      setBio(p.bio ?? '')
+      setVibeTags(p.vibe_tags ?? [])
+      setInstagram(p.instagram ?? '')
+      setPhotoUrl(p.photo_url ?? null)
+    } catch {
+      // If hydration fails we just stay in "create" mode — not fatal.
+    }
+  }
+
+  async function pickPhoto() {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync()
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Allow photo access to upload a profile picture.')
+      return
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.85,
+    })
+    if (result.canceled || !result.assets?.[0]) return
+    const uri = result.assets[0].uri
+    setPhotoLocalUri(uri)
+    if (DEV_MODE) {
+      // Preview only — no upload in dev.
+      setPhotoUrl(uri)
+    }
+  }
+
+  async function uploadPhotoIfNeeded(userId: string): Promise<string | null> {
+    if (!photoLocalUri) return photoUrl
+    setPhotoUploading(true)
+    try {
+      const res = await fetch(photoLocalUri)
+      const blob = await res.blob()
+      const ext = (photoLocalUri.split('.').pop() ?? 'jpg').toLowerCase()
+      const path = `${userId}/${Date.now()}.${ext}`
+      const { error: upErr } = await supabase.storage
+        .from('avatars')
+        .upload(path, blob, { contentType: `image/${ext === 'jpg' ? 'jpeg' : ext}`, upsert: true })
+      if (upErr) throw upErr
+      const { data } = supabase.storage.from('avatars').getPublicUrl(path)
+      return data.publicUrl
+    } finally {
+      setPhotoUploading(false)
+    }
+  }
 
   function toggleDay(day: Day) {
     setSchedule(s => ({ ...s, [day]: !s[day] }))
@@ -128,16 +228,36 @@ export default function CreateProfileScreen() {
     }
     setLoading(true)
     try {
+      if (DEV_MODE) {
+        const base = await getDevProfile()
+        const next: Profile = {
+          ...base,
+          display_name: displayName.trim(),
+          age: age ? parseInt(age, 10) : null,
+          gender: gender || null,
+          gym_name: gymName.trim() || null,
+          training_experience: experience || null,
+          sport: sport || null,
+          workout_style: workoutStyle || null,
+          goal: goal || null,
+          schedule,
+          bio: bio.trim() || null,
+          vibe_tags: vibeTags.length > 0 ? vibeTags : null,
+          instagram: instagram.replace('@', '').trim() || null,
+          photo_url: photoLocalUri ?? photoUrl,
+        }
+        await saveDevProfile(next)
+        router.replace('/(tabs)')
+        setLoading(false)
+        return
+      }
+
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) throw new Error('Not authenticated')
 
-      const slug =
-        displayName.toLowerCase().replace(/[^a-z0-9]/g, '') +
-        Math.random().toString(36).slice(2, 6)
+      const uploadedPhotoUrl = await uploadPhotoIfNeeded(user.id)
 
-      const { error } = await supabase.from('profiles').insert({
-        user_id: user.id,
-        slug,
+      const payload = {
         display_name: displayName.trim(),
         age: age ? parseInt(age, 10) : null,
         gender: gender || null,
@@ -150,15 +270,43 @@ export default function CreateProfileScreen() {
         bio: bio.trim() || null,
         vibe_tags: vibeTags.length > 0 ? vibeTags : null,
         instagram: instagram.replace('@', '').trim() || null,
-        is_pro: false,
-        wave_count: 0,
-        email: user.email,
-      })
+        photo_url: uploadedPhotoUrl,
+      }
 
-      if (error) throw error
+      // Resolve row by `user_id` so we never insert a duplicate if hydration lagged.
+      const { data: existingRow, error: selErr } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('user_id', user.id)
+        .maybeSingle()
+      if (selErr) throw selErr
+
+      if (existingRow?.id) {
+        const { error } = await supabase
+          .from('profiles')
+          .update(payload)
+          .eq('id', existingRow.id)
+          .select('id')
+          .single()
+        if (error) throw error
+      } else {
+        const slug =
+          displayName.toLowerCase().replace(/[^a-z0-9]/g, '') +
+          Math.random().toString(36).slice(2, 6)
+        const { error } = await supabase.from('profiles').insert({
+          ...payload,
+          user_id: user.id,
+          slug,
+          is_pro: false,
+          wave_count: 0,
+          email: user.email,
+        })
+        if (error) throw error
+      }
+
       router.replace('/(tabs)')
     } catch (e: any) {
-      Alert.alert('Error', e.message ?? 'Failed to create profile')
+      Alert.alert('Error', e.message ?? 'Failed to save profile')
     }
     setLoading(false)
   }
@@ -175,6 +323,11 @@ export default function CreateProfileScreen() {
     setStep(s => s + 1)
   }
 
+  async function handleSignOut() {
+    await supabase.auth.signOut()
+    router.replace('/')
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       {/* Progress bar */}
@@ -184,7 +337,9 @@ export default function CreateProfileScreen() {
             <Text style={styles.backText}>← Back</Text>
           </TouchableOpacity>
         ) : (
-          <View style={styles.backBtn} />
+          <TouchableOpacity onPress={handleSignOut} activeOpacity={0.7} style={styles.backBtn}>
+            <Text style={styles.backText}>Sign out</Text>
+          </TouchableOpacity>
         )}
         <View style={styles.progressBar}>
           {[1, 2, 3].map(i => (
@@ -202,14 +357,62 @@ export default function CreateProfileScreen() {
         >
           {step === 1 && (
             <>
-              <Text style={styles.stepTitle}>Tell us about you</Text>
-              <Text style={styles.stepSub}>Let's set up your athlete profile</Text>
+              <Text style={styles.stepTitle}>
+                {existingProfileId ? 'Edit your profile' : 'Tell us about you'}
+              </Text>
+              <Text style={styles.stepSub}>
+                {existingProfileId
+                  ? 'Update anything you want'
+                  : "Let's set up your athlete profile"}
+              </Text>
+
+              <SectionLabel text="Profile Photo" />
+              <View style={styles.photoRow}>
+                <TouchableOpacity
+                  onPress={pickPhoto}
+                  activeOpacity={0.8}
+                  style={styles.photoPickWrap}
+                >
+                  {photoUrl ? (
+                    <Image source={{ uri: photoUrl }} style={styles.photoImg} />
+                  ) : (
+                    <View style={styles.photoPlaceholder}>
+                      <Text style={styles.photoPlaceholderEmoji}>📷</Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+                <View style={{ flex: 1 }}>
+                  <TouchableOpacity
+                    onPress={pickPhoto}
+                    activeOpacity={0.7}
+                    style={styles.photoBtn}
+                    disabled={photoUploading}
+                  >
+                    <Text style={styles.photoBtnText}>
+                      {photoUploading
+                        ? 'Uploading…'
+                        : photoUrl
+                          ? 'Change photo'
+                          : 'Upload photo'}
+                    </Text>
+                  </TouchableOpacity>
+                  {photoUrl && !photoUploading && (
+                    <TouchableOpacity
+                      onPress={() => { setPhotoUrl(null); setPhotoLocalUri(null) }}
+                      activeOpacity={0.7}
+                      style={styles.photoRemoveBtn}
+                    >
+                      <Text style={styles.photoRemoveText}>Remove</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
 
               <SectionLabel text="Display Name *" />
               <StyledInput
                 value={displayName}
                 onChangeText={setDisplayName}
-                placeholder="How people see you"
+                placeholder="e.g. Alex Johnson"
               />
 
               <SectionLabel text="Age" />
@@ -264,16 +467,84 @@ export default function CreateProfileScreen() {
               <Text style={styles.stepSub}>Tell us your sport and style</Text>
 
               <SectionLabel text="Main Sport *" />
-              <View style={styles.pillWrap}>
-                {SPORTS.map(s => (
-                  <PillTag
-                    key={s.id}
-                    label={`${s.emoji} ${s.id}`}
-                    active={sport === s.id}
-                    onPress={() => setSport(sport === s.id ? '' : s.id)}
-                  />
-                ))}
+
+              <View style={styles.sportSearchWrap}>
+                <Text style={styles.sportSearchIcon}>🔍</Text>
+                <TextInput
+                  style={styles.sportSearchInput}
+                  value={sportQuery}
+                  onChangeText={setSportQuery}
+                  placeholder="Search sport..."
+                  placeholderTextColor="#555"
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                />
+                {sportQuery.length > 0 && (
+                  <TouchableOpacity onPress={() => setSportQuery('')} hitSlop={8}>
+                    <Text style={styles.sportSearchClear}>✕</Text>
+                  </TouchableOpacity>
+                )}
               </View>
+
+              {(() => {
+                const q = sportQuery.trim().toLowerCase()
+                const filter = (tier: 1 | 2 | 3) =>
+                  SPORTS.filter(s =>
+                    s.tier === tier &&
+                    (!q || s.id.toLowerCase().includes(q))
+                  )
+                const t1 = filter(1)
+                const t2 = filter(2)
+                const t3 = filter(3)
+
+                const Grid = ({ items }: { items: typeof SPORTS }) => (
+                  <View style={styles.sportGrid}>
+                    {items.map(s => {
+                      const active = sport === s.id
+                      return (
+                        <TouchableOpacity
+                          key={s.id}
+                          style={[styles.sportChip, active && styles.sportChipActive]}
+                          onPress={() => setSport(active ? '' : s.id)}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={styles.sportChipEmoji}>{s.emoji}</Text>
+                          <Text style={[styles.sportChipLabel, active && styles.sportChipLabelActive]}>
+                            {s.id}
+                          </Text>
+                        </TouchableOpacity>
+                      )
+                    })}
+                  </View>
+                )
+
+                if (q && t1.length + t2.length + t3.length === 0) {
+                  return <Text style={styles.sportEmpty}>No sports match “{sportQuery}”.</Text>
+                }
+
+                return (
+                  <>
+                    {t1.length > 0 && (
+                      <>
+                        <Text style={styles.sportTierLabel}>Popular</Text>
+                        <Grid items={t1} />
+                      </>
+                    )}
+                    {t2.length > 0 && (
+                      <>
+                        <Text style={styles.sportTierLabel}>Team sports</Text>
+                        <Grid items={t2} />
+                      </>
+                    )}
+                    {t3.length > 0 && (
+                      <>
+                        <Text style={styles.sportTierLabel}>More</Text>
+                        <Grid items={t3} />
+                      </>
+                    )}
+                  </>
+                )
+              })()}
 
               <SectionLabel text="Workout Style" />
               <View style={styles.pillWrap}>
@@ -412,7 +683,11 @@ export default function CreateProfileScreen() {
         {step < 3 ? (
           <GradientButton label="Next →" onPress={advance} />
         ) : (
-          <GradientButton label="Create My Profile 🚀" onPress={handleSubmit} loading={loading} />
+          <GradientButton
+            label={existingProfileId ? 'Save changes ✓' : 'Create My Profile 🚀'}
+            onPress={handleSubmit}
+            loading={loading}
+          />
         )}
       </View>
     </SafeAreaView>
@@ -437,6 +712,7 @@ const styles = StyleSheet.create({
   backText: {
     color: colors.primary,
     fontSize: 14,
+    lineHeight: lineHeightFor(14),
     fontFamily: F.semiBold,
   },
   progressBar: {
@@ -457,6 +733,7 @@ const styles = StyleSheet.create({
     width: 36,
     color: colors.muted,
     fontSize: 13,
+    lineHeight: lineHeightFor(13),
     fontFamily: F.semiBold,
     textAlign: 'right',
   },
@@ -466,6 +743,7 @@ const styles = StyleSheet.create({
   },
   stepTitle: {
     fontSize: 28,
+    lineHeight: lineHeightFor(28),
     fontFamily: F.extraBold,
     color: colors.text,
     letterSpacing: -0.5,
@@ -474,12 +752,14 @@ const styles = StyleSheet.create({
   },
   stepSub: {
     fontSize: 15,
+    lineHeight: lineHeightFor(15),
     fontFamily: F.regular,
     color: colors.muted,
     marginBottom: spacing.xl,
   },
   sectionLabel: {
     fontSize: 13,
+    lineHeight: lineHeightFor(13),
     fontFamily: F.bold,
     color: colors.text,
     marginBottom: spacing.sm,
@@ -493,6 +773,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     color: colors.text,
     fontSize: 16,
+    lineHeight: lineHeightFor(16),
     fontFamily: F.regular,
     borderWidth: 1.5,
     borderColor: colors.border,
@@ -532,11 +813,12 @@ const styles = StyleSheet.create({
   },
   expCardActive: {
     borderColor: colors.primary,
-    backgroundColor: 'rgba(255,107,0,0.1)',
+    backgroundColor: 'rgba(255,87,34,0.1)',
   },
-  expEmoji: { fontSize: 24 },
+  expEmoji: { fontSize: 24, lineHeight: lineHeightFor(24) },
   expLabel: {
     fontSize: 13,
+    lineHeight: lineHeightFor(13),
     fontFamily: F.semiBold,
     color: colors.muted,
     textAlign: 'center',
@@ -557,11 +839,12 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   dayBtnActive: {
-    backgroundColor: 'rgba(255,107,0,0.15)',
+    backgroundColor: 'rgba(255,87,34,0.15)',
     borderColor: colors.primary,
   },
   dayText: {
     fontSize: 11,
+    lineHeight: lineHeightFor(11),
     fontFamily: F.bold,
     color: colors.muted,
   },
@@ -577,11 +860,12 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   timeBtnActive: {
-    backgroundColor: 'rgba(255,107,0,0.15)',
+    backgroundColor: 'rgba(255,87,34,0.15)',
     borderColor: colors.primary,
   },
   timeText: {
     fontSize: 14,
+    lineHeight: lineHeightFor(14),
     fontFamily: F.bold,
     color: colors.muted,
   },
@@ -594,22 +878,24 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   aiBtn: {
-    backgroundColor: 'rgba(255,107,0,0.12)',
+    backgroundColor: 'rgba(255,87,34,0.12)',
     borderRadius: radius.full,
     paddingHorizontal: 14,
     paddingVertical: 7,
     borderWidth: 1,
-    borderColor: 'rgba(255,107,0,0.3)',
+    borderColor: 'rgba(255,87,34,0.3)',
     minWidth: 90,
     alignItems: 'center',
   },
   aiBtnText: {
     color: colors.primary,
     fontSize: 12,
+    lineHeight: lineHeightFor(12),
     fontFamily: F.bold,
   },
   charCount: {
     fontSize: 12,
+    lineHeight: lineHeightFor(12),
     color: colors.muted,
     textAlign: 'right',
     marginTop: 4,
@@ -620,8 +906,144 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     borderWidth: 1.5,
   },
+  sportSearchWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    borderRadius: radius.full,
+    paddingHorizontal: 14,
+    height: 44,
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  sportSearchIcon: {
+    fontSize: 14,
+    lineHeight: lineHeightFor(14),
+  },
+  sportSearchInput: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 14,
+    lineHeight: lineHeightFor(14),
+    fontFamily: F.regular,
+    padding: 0,
+  },
+  sportSearchClear: {
+    color: colors.muted,
+    fontSize: 14,
+    lineHeight: lineHeightFor(14),
+    fontFamily: F.bold,
+    paddingHorizontal: 4,
+  },
+  sportTierLabel: {
+    fontSize: 11,
+    lineHeight: lineHeightFor(11),
+    fontFamily: F.bold,
+    color: colors.muted,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginTop: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  sportGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: spacing.sm,
+  },
+  sportChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: radius.full,
+    backgroundColor: colors.surface,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+  },
+  sportChipActive: {
+    backgroundColor: 'rgba(255,87,34,0.15)',
+    borderColor: colors.primary,
+  },
+  sportChipEmoji: {
+    fontSize: 15,
+    lineHeight: lineHeightFor(15),
+  },
+  sportChipLabel: {
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.semiBold,
+    color: colors.muted,
+  },
+  sportChipLabelActive: {
+    color: colors.primary,
+  },
+  sportEmpty: {
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.regular,
+    color: colors.muted,
+    paddingVertical: spacing.md,
+    textAlign: 'center',
+  },
   vibeText: {
     fontSize: 12,
+    lineHeight: lineHeightFor(12),
+    fontFamily: F.semiBold,
+  },
+  photoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  photoPickWrap: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    overflow: 'hidden',
+    backgroundColor: colors.surface,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoImg: { width: '100%', height: '100%' },
+  photoPlaceholder: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+  },
+  photoPlaceholderEmoji: { fontSize: 28, lineHeight: 32 },
+  photoBtn: {
+    backgroundColor: 'rgba(255,87,34,0.12)',
+    borderColor: 'rgba(255,87,34,0.4)',
+    borderWidth: 1,
+    borderRadius: radius.full,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  photoBtnText: {
+    color: colors.primary,
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.bold,
+  },
+  photoRemoveBtn: {
+    marginTop: 6,
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
+  photoRemoveText: {
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: lineHeightFor(12),
     fontFamily: F.semiBold,
   },
   ctaContainer: {

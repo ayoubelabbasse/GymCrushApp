@@ -1,42 +1,31 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
+import { useFocusEffect } from '@react-navigation/native'
 import {
-  View, Text, Image, TouchableOpacity, StyleSheet,
-  Alert, ScrollView, Share,
+  View, Text, TouchableOpacity, StyleSheet,
+  Alert, ScrollView, Share, useWindowDimensions,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { LinearGradient } from 'expo-linear-gradient'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { supabase } from '../../lib/supabase'
 import Avatar from '../../components/Avatar'
+import ProBadge from '../../components/ProBadge'
 import Card from '../../components/Card'
-import GradientButton from '../../components/GradientButton'
-import { Profile, GymSession } from '../../lib/types'
+import { Profile } from '../../lib/types'
 import { SPORTS } from '../../constants/data'
-import { colors, spacing, radius, vibeTagColors, F } from '../../constants/theme'
+import { colors, spacing, radius, vibeTagColors, F, lineHeightFor, profileHeroGradient, gradients } from '../../constants/theme'
+import { DEV_MODE } from '../../lib/devMode'
+import { getDevProfile } from '../../lib/devMockProfile'
+import {
+  MOCK_USER_ID,
+  MOCK_OTHER_PROFILES,
+} from '../../lib/mockData'
 
 const WEB = 'https://gymcrush-one.vercel.app'
 
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-
-function calcStreak(sessions: GymSession[]) {
-  if (!sessions.length) return 0
-  const today = new Date(); today.setHours(0, 0, 0, 0)
-  const unique = [...new Set(
-    sessions.map(s => {
-      const d = new Date(s.checked_in_at); d.setHours(0, 0, 0, 0); return d.getTime()
-    })
-  )].sort((a, b) => b - a)
-  let streak = 0
-  let cursor = today.getTime()
-  for (const ts of unique) {
-    if (ts === cursor || ts === cursor - 86400000) {
-      streak++; cursor = ts - 86400000
-    } else break
-  }
-  return streak
-}
 
 async function getDeviceId() {
   let id = await AsyncStorage.getItem('gc_device_id')
@@ -48,20 +37,38 @@ async function getDeviceId() {
 }
 
 export default function PublicProfileScreen() {
+  const { height: windowHeight } = useWindowDimensions()
+  const heroHeight = windowHeight * 0.5
+  const insets = useSafeAreaInsets()
   const { slug } = useLocalSearchParams<{ slug: string }>()
   const router = useRouter()
   const [profile, setProfile] = useState<Profile | null>(null)
-  const [sessions, setSessions] = useState<GymSession[]>([])
   const [loading, setLoading] = useState(true)
   const [currentUserId, setCurrentUserId] = useState<string | null>(null)
   const [waveSent, setWaveSent] = useState(false)
   const [gymMatch, setGymMatch] = useState(false)
 
-  useEffect(() => { loadProfile() }, [slug])
-
-  async function loadProfile() {
+  const loadProfile = useCallback(async () => {
     setLoading(true)
     try {
+      if (DEV_MODE) {
+        setCurrentUserId(MOCK_USER_ID)
+        const mine = await getDevProfile()
+        if (slug === mine.slug) {
+          setProfile(mine)
+        } else {
+          const other = MOCK_OTHER_PROFILES.find(p => p.slug === slug)
+          if (other) {
+            setProfile(other)
+          } else {
+            Alert.alert('Not found', 'Profile not found')
+            setProfile(null)
+          }
+        }
+        setLoading(false)
+        return
+      }
+
       const { data: { user } } = await supabase.auth.getUser()
       setCurrentUserId(user?.id ?? null)
 
@@ -75,15 +82,6 @@ export default function PublicProfileScreen() {
       if (!prof) { Alert.alert('Not found', 'Profile not found'); return }
       setProfile(prof)
 
-      const { data: sess } = await supabase
-        .from('gym_sessions')
-        .select('*')
-        .eq('profile_id', prof.id)
-        .order('checked_in_at', { ascending: false })
-        .limit(50)
-
-      setSessions(sess ?? [])
-
       // Record view
       if (user && user.id !== prof.user_id) {
         await supabase.from('profile_views').insert({
@@ -96,11 +94,21 @@ export default function PublicProfileScreen() {
       Alert.alert('Error', e.message)
     }
     setLoading(false)
-  }
+  }, [slug])
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadProfile()
+    }, [loadProfile])
+  )
 
   async function handleWave() {
     if (!profile) return
     try {
+      if (DEV_MODE) {
+        setWaveSent(true)
+        return
+      }
       const deviceId = await getDeviceId()
       const res = await fetch(`${WEB}/api/wave`, {
         method: 'POST',
@@ -128,89 +136,111 @@ export default function PublicProfileScreen() {
 
   if (loading || !profile) {
     return (
-      <SafeAreaView style={styles.container}>
+      <SafeAreaView style={styles.container} edges={['bottom']}>
         <Text style={styles.loadingText}>{loading ? 'Loading...' : 'Profile not found'}</Text>
       </SafeAreaView>
     )
   }
 
-  const streak = calcStreak(sessions)
   const sport = SPORTS.find(s => s.id === profile.sport)
   const isOwnProfile = currentUserId !== null && profile.user_id === currentUserId
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['bottom']}>
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
+        contentInsetAdjustmentBehavior="never"
       >
-        {/* Back button */}
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} activeOpacity={0.7}>
-          <Text style={styles.backText}>← Back</Text>
-        </TouchableOpacity>
-
-        {/* Hero header */}
-        <View style={styles.hero}>
-          {profile.photo_url ? (
-            <>
-              <Image source={{ uri: profile.photo_url }} style={styles.heroImage} />
-              <View style={styles.heroOverlay} />
-            </>
-          ) : (
-            <LinearGradient
-              colors={['#1a0a00', colors.background]}
-              style={styles.heroGradient}
-            />
-          )}
-          <View style={styles.heroContent}>
-            <Avatar photoUrl={profile.photo_url} name={profile.display_name} size={96} />
+        {/* Top half: warm hero gradient + avatar; back floats over hero so the band is full 50% */}
+        <View style={[styles.heroSection, { height: heroHeight }]}>
+          <LinearGradient
+            {...profileHeroGradient}
+            style={StyleSheet.absoluteFillObject}
+          />
+          <TouchableOpacity
+            onPress={() => router.back()}
+            style={[styles.backOverHero, { top: insets.top + 8 }]}
+            activeOpacity={0.7}
+            hitSlop={12}
+          >
+            <Text style={styles.backText}>← Back</Text>
+          </TouchableOpacity>
+          <View style={[styles.heroAvatarBlock, { paddingTop: insets.top }]}>
+            <Avatar photoUrl={profile.photo_url} name={profile.display_name} size={120} />
           </View>
         </View>
 
-        {/* Profile info */}
+        {/* Profile info — matches web reference */}
         <View style={styles.profileInfo}>
           <View style={styles.nameRow}>
             <Text style={styles.displayName}>{profile.display_name}</Text>
-            {profile.is_pro && (
-              <View style={styles.proBadge}>
-                <Text style={styles.proText}>⚡ Pro</Text>
-              </View>
-            )}
+            {profile.is_pro && <ProBadge />}
           </View>
 
-          {(profile.age || profile.gym_name) ? (
+          {(profile.age != null || profile.gym_name) ? (
             <Text style={styles.metaText}>
-              {[profile.age ? `${profile.age}yo` : null, profile.gym_name]
-                .filter(Boolean).join(' · ')}
+              {[
+                profile.age != null ? `${profile.age}` : null,
+                profile.gym_name,
+              ].filter(Boolean).join(' · ')}
             </Text>
           ) : null}
 
-          {/* Stats pills */}
-          <View style={styles.statsPills}>
-            <View style={styles.statPill}><Text style={styles.statPillText}>💪 {sessions.length} sessions</Text></View>
-            <View style={styles.statPill}><Text style={styles.statPillText}>🔥 {streak} streak</Text></View>
-            <View style={styles.statPill}><Text style={styles.statPillText}>👋 {profile.wave_count} waves</Text></View>
-          </View>
-
-          {/* Sport / goal / style */}
           {(sport || profile.goal || profile.workout_style) && (
             <View style={styles.pillsRow}>
               {sport && (
-                <View style={styles.sportPill}>
-                  <Text style={styles.sportPillText}>{sport.emoji} {sport.id}</Text>
+                <View style={styles.tagOutline}>
+                  <Text style={styles.tagOutlineText}>{sport.id}</Text>
                 </View>
               )}
               {profile.goal && (
-                <View style={styles.sportPill}>
-                  <Text style={styles.sportPillText}>🎯 {profile.goal}</Text>
+                <View style={styles.tagFilled}>
+                  <Text style={styles.tagFilledText}>{profile.goal}</Text>
                 </View>
               )}
               {profile.workout_style && (
-                <View style={styles.sportPill}>
-                  <Text style={styles.sportPillText}>⚡ {profile.workout_style}</Text>
+                <View style={styles.tagFilled}>
+                  <Text style={styles.tagFilledText}>{profile.workout_style}</Text>
                 </View>
               )}
             </View>
+          )}
+        </View>
+
+        {profile.bio ? (
+          <Text style={styles.bioStandalone}>{profile.bio}</Text>
+        ) : null}
+
+        {/* Footer: waves stat + Wave / Share (reference layout) */}
+        <View style={styles.profileFooter}>
+          <Text style={styles.footerStat}>🔥 {profile.wave_count} waves</Text>
+          {isOwnProfile ? (
+            <TouchableOpacity onPress={handleShare} activeOpacity={0.88} style={styles.footerCtaTouch}>
+              <LinearGradient
+                colors={[...gradients.primary]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.footerCta}
+              >
+                <Text style={styles.footerCtaText}>📤 Share</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          ) : waveSent ? (
+            <View style={styles.wavedCompact}>
+              <Text style={styles.wavedCompactText}>✅ Waved</Text>
+            </View>
+          ) : (
+            <TouchableOpacity onPress={handleWave} activeOpacity={0.88} style={styles.footerCtaTouch}>
+              <LinearGradient
+                colors={[...gradients.primary]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.footerCta}
+              >
+                <Text style={styles.footerCtaText}>👋 Wave</Text>
+              </LinearGradient>
+            </TouchableOpacity>
           )}
         </View>
 
@@ -247,14 +277,6 @@ export default function PublicProfileScreen() {
           </Card>
         )}
 
-        {/* Bio */}
-        {profile.bio && (
-          <Card style={styles.section}>
-            <Text style={styles.sectionLabel}>BIO</Text>
-            <Text style={styles.bioText}>{profile.bio}</Text>
-          </Card>
-        )}
-
         {/* Training schedule */}
         {profile.schedule && (
           <Card style={styles.section}>
@@ -286,24 +308,6 @@ export default function PublicProfileScreen() {
           </Card>
         )}
 
-        {/* Wave count */}
-        <Text style={styles.waveCount}>
-          🔥 {profile.wave_count} people waved at {profile.display_name}
-        </Text>
-
-        {/* CTA */}
-        <View style={styles.ctaSection}>
-          {isOwnProfile ? (
-            <GradientButton label="📤 Share Your Profile" onPress={handleShare} />
-          ) : waveSent ? (
-            <View style={styles.wavedBtn}>
-              <Text style={styles.wavedText}>✅ Waved!</Text>
-            </View>
-          ) : (
-            <GradientButton label="👋 Send a Wave" onPress={handleWave} />
-          )}
-        </View>
-
         {/* Banner for non-users */}
         {!currentUserId && (
           <Card style={styles.banner}>
@@ -323,92 +327,137 @@ export default function PublicProfileScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
-  loadingText: { color: colors.muted, textAlign: 'center', marginTop: 100, fontFamily: F.regular },
+  loadingText: { color: colors.muted, textAlign: 'center', marginTop: 100, fontSize: 16, lineHeight: lineHeightFor(16), fontFamily: F.regular },
   scroll: { paddingBottom: 24 },
-  backBtn: {
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.md,
+  backOverHero: {
+    position: 'absolute',
+    left: spacing.xl,
+    zIndex: 10,
+    paddingVertical: 4,
   },
-  backText: { color: colors.primary, fontSize: 15, fontFamily: F.semiBold },
-  hero: {
-    height: 200,
+  backText: { color: colors.primary, fontSize: 15, lineHeight: lineHeightFor(15), fontFamily: F.semiBold },
+  heroSection: {
+    width: '100%',
     position: 'relative',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    paddingBottom: spacing.lg,
     overflow: 'hidden',
+    backgroundColor: '#000000',
   },
-  heroImage: {
-    ...StyleSheet.absoluteFillObject,
-    resizeMode: 'cover',
-  },
-  heroOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-  },
-  heroGradient: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  heroContent: {
+  heroAvatarBlock: {
+    flex: 1,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   profileInfo: {
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.lg,
     paddingBottom: spacing.md,
+    alignItems: 'center',
   },
   nameRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
     gap: spacing.sm,
     marginBottom: 6,
   },
   displayName: {
-    fontSize: 30,
+    fontSize: 24,
+    lineHeight: lineHeightFor(24),
     fontFamily: F.extraBold,
     color: colors.text,
     letterSpacing: -0.5,
+    textAlign: 'center',
   },
-  proBadge: {
-    backgroundColor: 'rgba(255,107,0,0.15)',
-    borderRadius: radius.full,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderWidth: 1,
-    borderColor: 'rgba(255,107,0,0.4)',
-  },
-  proText: { fontSize: 12, fontFamily: F.bold, color: colors.primary },
-  metaText: { fontSize: 14, fontFamily: F.regular, color: colors.muted, marginBottom: spacing.md },
-  statsPills: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    marginBottom: spacing.md,
-    flexWrap: 'wrap',
-  },
-  statPill: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: radius.full,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-  },
-  statPillText: { fontSize: 12, fontFamily: F.semiBold, color: colors.muted },
+  metaText: { fontSize: 14, lineHeight: lineHeightFor(14), fontFamily: F.regular, color: colors.muted, marginBottom: spacing.sm, textAlign: 'center' },
   pillsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
-    marginBottom: spacing.sm,
+    marginBottom: 0,
+    justifyContent: 'center',
   },
-  sportPill: {
-    paddingHorizontal: 12,
+  tagOutline: {
+    paddingHorizontal: 14,
     paddingVertical: 7,
     borderRadius: radius.full,
-    backgroundColor: 'rgba(255,107,0,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,107,0,0.3)',
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    backgroundColor: 'transparent',
   },
-  sportPillText: { fontSize: 13, fontFamily: F.semiBold, color: colors.primary },
+  tagOutlineText: {
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.semiBold,
+    color: colors.primary,
+  },
+  tagFilled: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface2,
+  },
+  tagFilledText: {
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.semiBold,
+    color: colors.muted,
+  },
+  bioStandalone: {
+    fontSize: 15,
+    lineHeight: lineHeightFor(15),
+    fontFamily: F.regular,
+    color: colors.text,
+    textAlign: 'center',
+    marginHorizontal: spacing.xl,
+    marginTop: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  profileFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.xl,
+    marginBottom: spacing.xl,
+  },
+  footerStat: {
+    fontSize: 15,
+    lineHeight: lineHeightFor(15),
+    fontFamily: F.semiBold,
+    color: colors.text,
+  },
+  /** Rounded-rect radius — matches Discover card Wave button (`radius.md` = 12). */
+  footerCtaTouch: { borderRadius: radius.md, overflow: 'hidden' },
+  footerCta: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  footerCtaText: {
+    color: '#fff',
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.semiBold,
+    fontWeight: '600',
+  },
+  wavedCompact: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: radius.md,
+    backgroundColor: 'rgba(52,211,153,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(52,211,153,0.35)',
+  },
+  wavedCompactText: {
+    fontSize: 14,
+    lineHeight: lineHeightFor(14),
+    fontFamily: F.bold,
+    color: '#34d399',
+  },
   gymMatch: {
     marginHorizontal: spacing.xl,
     backgroundColor: 'rgba(255,61,107,0.12)',
@@ -419,14 +468,15 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,61,107,0.4)',
     marginBottom: spacing.md,
   },
-  gymMatchText: { fontSize: 22, fontFamily: F.extraBold, color: '#FF3D6B' },
-  gymMatchSub: { fontSize: 14, fontFamily: F.regular, color: colors.muted, marginTop: 4 },
+  gymMatchText: { fontSize: 22, lineHeight: lineHeightFor(22), fontFamily: F.extraBold, color: '#FF3D6B' },
+  gymMatchSub: { fontSize: 14, lineHeight: lineHeightFor(14), fontFamily: F.regular, color: colors.muted, marginTop: 4 },
   section: {
     marginHorizontal: spacing.xl,
     marginBottom: spacing.md,
   },
   sectionLabel: {
     fontSize: 11,
+    lineHeight: lineHeightFor(11),
     fontFamily: F.bold,
     color: colors.muted,
     letterSpacing: 1,
@@ -440,20 +490,21 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderWidth: 1.5,
   },
-  vibePillText: { fontSize: 12, fontFamily: F.semiBold },
+  vibePillText: { fontSize: 12, lineHeight: lineHeightFor(12), fontFamily: F.semiBold },
   goalCard: {
-    backgroundColor: 'rgba(255,107,0,0.08)',
-    borderColor: 'rgba(255,107,0,0.4)',
+    backgroundColor: 'rgba(255,87,34,0.08)',
+    borderColor: 'rgba(255,87,34,0.4)',
   },
   goalLabel: {
     fontSize: 11,
+    lineHeight: lineHeightFor(11),
     fontFamily: F.bold,
     color: colors.primary,
     letterSpacing: 1,
     marginBottom: spacing.sm,
   },
-  goalText: { fontSize: 15, fontFamily: F.regular, color: colors.text, lineHeight: 22 },
-  bioText: { fontSize: 15, fontFamily: F.regular, color: colors.text, lineHeight: 22 },
+  goalText: { fontSize: 15, fontFamily: F.regular, color: colors.text, lineHeight: lineHeightFor(15) },
+  bioText: { fontSize: 15, fontFamily: F.regular, color: colors.text, lineHeight: lineHeightFor(15) },
   daysRow: { flexDirection: 'row', gap: 4, marginBottom: spacing.sm },
   dayBtn: {
     flex: 1,
@@ -466,40 +517,18 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   dayBtnActive: {
-    backgroundColor: 'rgba(255,107,0,0.15)',
+    backgroundColor: 'rgba(255,87,34,0.15)',
     borderColor: colors.primary,
   },
-  dayText: { fontSize: 10, fontFamily: F.bold, color: colors.muted },
+  dayText: { fontSize: 10, lineHeight: lineHeightFor(10), fontFamily: F.bold, color: colors.muted },
   dayTextActive: { color: colors.primary },
-  timeText: { fontSize: 13, fontFamily: F.regular, color: colors.muted },
-  instaText: { fontSize: 14, fontFamily: F.semiBold, color: colors.text },
-  waveCount: {
-    textAlign: 'center',
-    fontFamily: F.regular,
-    color: colors.muted,
-    fontSize: 14,
-    marginVertical: spacing.lg,
-    paddingHorizontal: spacing.xl,
-  },
-  ctaSection: {
-    paddingHorizontal: spacing.xl,
-    marginBottom: spacing.xl,
-  },
-  wavedBtn: {
-    height: 56,
-    backgroundColor: 'rgba(52,211,153,0.12)',
-    borderRadius: radius.lg,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(52,211,153,0.3)',
-  },
-  wavedText: { fontSize: 17, fontFamily: F.bold, color: '#34d399' },
+  timeText: { fontSize: 13, lineHeight: lineHeightFor(13), fontFamily: F.regular, color: colors.muted },
+  instaText: { fontSize: 14, lineHeight: lineHeightFor(14), fontFamily: F.semiBold, color: colors.text },
   banner: {
     marginHorizontal: spacing.xl,
     gap: spacing.sm,
   },
-  bannerTitle: { fontSize: 16, fontFamily: F.extraBold, color: colors.text },
-  bannerSub: { fontSize: 13, fontFamily: F.regular, color: colors.muted },
-  bannerLink: { fontSize: 14, fontFamily: F.bold, color: colors.primary },
+  bannerTitle: { fontSize: 16, lineHeight: lineHeightFor(16), fontFamily: F.extraBold, color: colors.text },
+  bannerSub: { fontSize: 13, lineHeight: lineHeightFor(13), fontFamily: F.regular, color: colors.muted },
+  bannerLink: { fontSize: 14, lineHeight: lineHeightFor(14), fontFamily: F.bold, color: colors.primary },
 })

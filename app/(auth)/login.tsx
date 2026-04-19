@@ -6,83 +6,201 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import * as WebBrowser from 'expo-web-browser'
-import { makeRedirectUri } from 'expo-auth-session'
 import { supabase } from '../../lib/supabase'
+import { getAuthCallbackUrl } from '../../lib/oauthRedirect'
 import GCLogo from '../../components/GCLogo'
 import GradientButton from '../../components/GradientButton'
-import { colors, spacing, radius, F } from '../../constants/theme'
+import { colors, spacing, radius, F, lineHeightFor } from '../../constants/theme'
 
 WebBrowser.maybeCompleteAuthSession()
 
+// ─── OAuth helpers (Google only — kept intact) ──────────────────────────────
+
+function getCodeFromUrl(url: string): string | null {
+  try {
+    const u = new URL(url)
+    return u.searchParams.get('code') ?? new URLSearchParams(u.hash?.replace(/^#/, '')).get('code')
+  } catch { return null }
+}
+
+function getTokensFromUrl(url: string): { access_token: string; refresh_token: string } | null {
+  try {
+    const hash = new URL(url).hash?.replace(/^#/, '')
+    if (!hash) return null
+    const p = new URLSearchParams(hash)
+    const access_token = p.get('access_token')
+    const refresh_token = p.get('refresh_token')
+    if (access_token && refresh_token) return { access_token, refresh_token }
+  } catch {}
+  return null
+}
+
+// ─── Screen ──────────────────────────────────────────────────────────────────
+
+type Step = 'email' | 'code'
+
 export default function LoginScreen() {
+  const [step, setStep] = useState<Step>('email')
   const [email, setEmail] = useState('')
+  const [code, setCode] = useState('')
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
-  const [sent, setSent] = useState(false)
-  const [focused, setFocused] = useState(false)
+  const [focused, setFocused] = useState<'email' | 'code' | null>(null)
 
-  async function handleMagicLink() {
-    if (!email.trim()) {
+  // ── Step 1: send sign-in email ────────────────────────────────────────────
+
+  async function handleSendCode() {
+    const trimmed = email.trim()
+    if (!trimmed) {
       Alert.alert('Enter your email', 'Please enter your email address.')
       return
     }
     setLoading(true)
     const { error } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
+      email: trimmed,
       options: {
-        emailRedirectTo: makeRedirectUri({ scheme: 'gymcrush', path: 'auth/callback' }),
+        shouldCreateUser: true,
+        emailRedirectTo: getAuthCallbackUrl(),
       },
     })
     setLoading(false)
-    if (error) Alert.alert('Error', error.message)
-    else setSent(true)
+    if (error) {
+      Alert.alert('Error', error.message)
+    } else {
+      setStep('code')
+    }
   }
+
+  // ── Step 2: verify 6-digit code ───────────────────────────────────────────
+
+  async function handleVerifyCode() {
+    const trimmed = code.trim()
+    if (trimmed.length < 6) {
+      Alert.alert('Enter the code', 'Please enter the full code from your email.')
+      return
+    }
+    setLoading(true)
+    const { error } = await supabase.auth.verifyOtp({
+      email: email.trim(),
+      token: trimmed,
+      type: 'email',
+    })
+    setLoading(false)
+    if (error) {
+      Alert.alert('Incorrect code', 'That code is wrong or has expired. Try again or resend.')
+    }
+    // On success _layout.tsx onAuthStateChange handles routing automatically.
+  }
+
+  // ── Google OAuth (secondary) ───────────────────────────────────────────────
 
   async function handleGoogle() {
     setGoogleLoading(true)
+    const redirectTo = getAuthCallbackUrl()
     try {
-      const redirectUrl = makeRedirectUri({ scheme: 'gymcrush', path: 'auth/callback' })
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
-        options: { redirectTo: redirectUrl, skipBrowserRedirect: true },
+        options: { redirectTo, skipBrowserRedirect: true },
       })
       if (error) { Alert.alert('Error', error.message); return }
+      if (!data?.url) return
 
-      if (data?.url) {
-        const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl)
-        if (result.type === 'success' && result.url) {
-          const url = new URL(result.url)
-          const code = url.searchParams.get('code')
-          if (code) {
-            const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code)
-            if (exchangeError) Alert.alert('Error', exchangeError.message)
-          }
-        }
+      const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo)
+      if (result.type !== 'success' || !result.url) return
+
+      const oauthCode = getCodeFromUrl(result.url)
+      if (oauthCode) {
+        const { error: err } = await supabase.auth.exchangeCodeForSession(oauthCode)
+        if (err) Alert.alert('Error', err.message)
+        return
       }
+
+      const tokens = getTokensFromUrl(result.url)
+      if (tokens) {
+        const { error: err } = await supabase.auth.setSession(tokens)
+        if (err) Alert.alert('Error', err.message)
+        return
+      }
+
+      Alert.alert('Sign-in failed', 'Try again.')
     } catch (err: any) {
       Alert.alert('Error', err.message ?? 'Google sign in failed')
+    } finally {
+      setGoogleLoading(false)
     }
-    setGoogleLoading(false)
   }
 
-  if (sent) {
+  // ── Code entry screen (step 2) ────────────────────────────────────────────
+
+  if (step === 'code') {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.successBox}>
-          <Text style={styles.mailEmoji}>📬</Text>
-          <Text style={styles.successTitle}>Check your email!</Text>
-          <Text style={styles.successSub}>We sent a magic link to</Text>
-          <Text style={styles.successEmail}>{email}</Text>
-          <Text style={styles.successHint}>
-            Tap the link — it will open the app automatically
-          </Text>
-          <TouchableOpacity style={styles.retryButton} onPress={() => setSent(false)}>
-            <Text style={styles.retryText}>Try a different email</Text>
-          </TouchableOpacity>
-        </View>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={{ flex: 1 }}
+        >
+          <ScrollView
+            contentContainerStyle={styles.scroll}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <TouchableOpacity
+              style={styles.backRow}
+              onPress={() => { setStep('email'); setCode('') }}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.backText}>← Back</Text>
+            </TouchableOpacity>
+
+            <View style={{ height: spacing.xl }} />
+            <View style={styles.logoRow}><GCLogo size={52} /></View>
+
+            <Text style={styles.heading}>Check your email</Text>
+            <Text style={styles.sub}>
+              {'We sent a sign-in code to\n'}
+              <Text style={styles.emailHighlight}>{email.trim()}</Text>
+            </Text>
+
+            <View style={{ height: spacing.xl }} />
+
+            <Text style={styles.inputLabel}>Sign-in code</Text>
+            <TextInput
+              style={[styles.codeInput, focused === 'code' && styles.codeInputFocused]}
+              value={code}
+              onChangeText={t => setCode(t.replace(/[^0-9]/g, '').slice(0, 8))}
+              placeholder="00000000"
+              placeholderTextColor="#444"
+              keyboardType="number-pad"
+              maxLength={8}
+              autoFocus
+              onFocus={() => setFocused('code')}
+              onBlur={() => setFocused(null)}
+              onSubmitEditing={handleVerifyCode}
+              returnKeyType="done"
+            />
+
+            <View style={{ height: spacing.lg }} />
+
+            <GradientButton
+              label={loading ? 'Verifying…' : 'Verify →'}
+              onPress={handleVerifyCode}
+              loading={loading}
+            />
+
+            <TouchableOpacity
+              style={styles.resendRow}
+              onPress={() => { setCode(''); handleSendCode() }}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.resendText}>Resend code</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </KeyboardAvoidingView>
       </SafeAreaView>
     )
   }
+
+  // ── Email entry screen (step 1) ────────────────────────────────────────────
 
   return (
     <SafeAreaView style={styles.container}>
@@ -91,42 +209,24 @@ export default function LoginScreen() {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={styles.scroll}
+          contentContainerStyle={[styles.scroll, styles.scrollGrow]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <View style={{ height: spacing.xxxl }} />
+          <View style={{ height: spacing.xxl }} />
 
           <View style={styles.logoRow}>
             <GCLogo size={64} />
           </View>
 
-          <Text style={styles.heading}>Welcome back 👋</Text>
-          <Text style={styles.sub}>Sign in to access your GymCrush profile</Text>
+          <Text style={styles.heading}>Sign in to GymCrush</Text>
+          <Text style={styles.sub}>Enter your email to receive a sign-in code</Text>
 
-          <View style={{ height: 40 }} />
+          <View style={{ height: spacing.xl }} />
 
-          <TouchableOpacity
-            style={styles.googleButton}
-            onPress={handleGoogle}
-            disabled={googleLoading}
-            activeOpacity={0.85}
-          >
-            <Text style={styles.googleIcon}>G</Text>
-            <Text style={styles.googleText}>
-              {googleLoading ? 'Opening Google...' : 'Continue with Google'}
-            </Text>
-          </TouchableOpacity>
-
-          <View style={styles.divider}>
-            <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>or continue with email</Text>
-            <View style={styles.dividerLine} />
-          </View>
-
-          <Text style={styles.inputLabel}>Email address</Text>
+          <Text style={styles.inputLabel}>Email</Text>
           <TextInput
-            style={[styles.input, focused && styles.inputFocused]}
+            style={[styles.input, focused === 'email' && styles.inputFocused]}
             value={email}
             onChangeText={setEmail}
             placeholder="you@example.com"
@@ -134,19 +234,35 @@ export default function LoginScreen() {
             keyboardType="email-address"
             autoCapitalize="none"
             autoCorrect={false}
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
+            onFocus={() => setFocused('email')}
+            onBlur={() => setFocused(null)}
+            onSubmitEditing={handleSendCode}
+            returnKeyType="done"
           />
 
-          <View style={{ height: spacing.md }} />
+          <View style={{ height: spacing.lg }} />
 
           <GradientButton
-            label="Send Magic Link ✨"
-            onPress={handleMagicLink}
+            label={loading ? 'Sending…' : 'Send Code →'}
+            onPress={handleSendCode}
             loading={loading}
           />
 
-          <Text style={styles.hint}>No password needed. Check your inbox after tapping.</Text>
+          {/* Push Google option to the bottom */}
+          <View style={{ flex: 1, minHeight: spacing.xxl * 2 }} />
+
+          <TouchableOpacity
+            style={styles.googleRow}
+            onPress={handleGoogle}
+            disabled={googleLoading}
+            activeOpacity={0.6}
+          >
+            <Text style={styles.googleText}>
+              {googleLoading ? 'Opening Google…' : 'Or continue with Google'}
+            </Text>
+          </TouchableOpacity>
+
+          <View style={{ height: spacing.xl }} />
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -155,10 +271,14 @@ export default function LoginScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
-  scroll: { paddingHorizontal: spacing.xl, paddingBottom: 40 },
-  logoRow: { alignItems: 'center', marginBottom: spacing.xl },
+  scroll: { paddingHorizontal: spacing.xl, paddingBottom: 16 },
+  scrollGrow: { flexGrow: 1 },
+
+  logoRow: { alignItems: 'center', marginBottom: spacing.lg },
+
   heading: {
-    fontSize: 32,
+    fontSize: 30,
+    lineHeight: lineHeightFor(30),
     fontFamily: F.extraBold,
     color: colors.text,
     textAlign: 'center',
@@ -166,31 +286,24 @@ const styles = StyleSheet.create({
   },
   sub: {
     fontSize: 15,
+    lineHeight: lineHeightFor(15),
     fontFamily: F.regular,
     color: colors.muted,
     textAlign: 'center',
     marginTop: 8,
   },
-  googleButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFFFFF',
-    borderRadius: radius.lg,
-    height: 54,
-    gap: 10,
+  emailHighlight: {
+    color: colors.primary,
+    fontFamily: F.bold,
   },
-  googleIcon: { fontSize: 18, fontFamily: F.extraBold, color: '#4285F4' },
-  googleText: { fontSize: 16, fontFamily: F.bold, color: '#111111' },
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: spacing.xl,
-    gap: spacing.md,
+
+  inputLabel: {
+    fontSize: 14,
+    lineHeight: lineHeightFor(14),
+    fontFamily: F.bold,
+    color: colors.text,
+    marginBottom: spacing.sm,
   },
-  dividerLine: { flex: 1, height: 1, backgroundColor: colors.border },
-  dividerText: { fontSize: 12, fontFamily: F.semiBold, color: colors.muted },
-  inputLabel: { fontSize: 14, fontFamily: F.bold, color: colors.text, marginBottom: spacing.sm },
   input: {
     backgroundColor: colors.surface,
     borderRadius: radius.md,
@@ -198,32 +311,65 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     color: colors.text,
     fontSize: 16,
+    lineHeight: lineHeightFor(16),
     fontFamily: F.regular,
     borderWidth: 1.5,
     borderColor: colors.border,
   },
   inputFocused: { borderColor: colors.primary },
-  hint: { fontSize: 13, fontFamily: F.regular, color: colors.muted, textAlign: 'center', marginTop: spacing.md },
-  successBox: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: spacing.xl,
-    gap: spacing.md,
-  },
-  mailEmoji: { fontSize: 64 },
-  successTitle: { fontSize: 28, fontFamily: F.extraBold, color: colors.text, letterSpacing: -0.5 },
-  successSub: { fontSize: 15, fontFamily: F.regular, color: colors.muted },
-  successEmail: { fontSize: 16, fontFamily: F.bold, color: colors.primary },
-  successHint: { fontSize: 14, fontFamily: F.regular, color: colors.muted, textAlign: 'center' },
-  retryButton: {
-    marginTop: spacing.lg,
+
+  // Code input — large, centred digits
+  codeInput: {
     backgroundColor: colors.surface,
     borderRadius: radius.md,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderWidth: 1,
+    height: 72,
+    paddingHorizontal: 20,
+    color: colors.text,
+    fontSize: 32,
+    lineHeight: lineHeightFor(32),
+    fontFamily: F.extraBold,
+    borderWidth: 1.5,
     borderColor: colors.border,
+    letterSpacing: 14,
+    textAlign: 'center',
   },
-  retryText: { color: colors.text, fontFamily: F.semiBold, fontSize: 14 },
+  codeInputFocused: { borderColor: colors.primary },
+
+  // Google — small, muted, at the bottom
+  googleRow: {
+    alignSelf: 'center',
+    paddingVertical: spacing.sm,
+  },
+  googleText: {
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.regular,
+    color: colors.muted,
+    textDecorationLine: 'underline',
+  },
+
+  // Back link (code step)
+  backRow: {
+    paddingTop: spacing.md,
+  },
+  backText: {
+    fontSize: 14,
+    lineHeight: lineHeightFor(14),
+    fontFamily: F.semiBold,
+    color: colors.primary,
+  },
+
+  // Resend link (code step)
+  resendRow: {
+    alignSelf: 'center',
+    marginTop: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  resendText: {
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.regular,
+    color: colors.muted,
+    textDecorationLine: 'underline',
+  },
 })

@@ -1,14 +1,21 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
+import { useFocusEffect } from '@react-navigation/native'
 import {
   View, Text, TouchableOpacity, StyleSheet, Alert, Animated, ScrollView,
+  RefreshControl,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { LinearGradient } from 'expo-linear-gradient'
 import { supabase } from '../../lib/supabase'
-import GradientButton from '../../components/GradientButton'
 import Card from '../../components/Card'
+import Heatmap from '../../components/Heatmap'
 import { GymSession } from '../../lib/types'
-import { CHECKIN_WORKOUT_TYPES } from '../../constants/data'
-import { colors, spacing, radius, F } from '../../constants/theme'
+import { CHECKIN_WORKOUT_TYPES, CHECKIN_WORKOUT_META } from '../../constants/data'
+import { colors, spacing, radius, F, lineHeightFor, gradients } from '../../constants/theme'
+import { DEV_MODE } from '../../lib/devMode'
+import { getDevProfile } from '../../lib/devMockProfile'
+import { mockGymSessions } from '../../lib/mockData'
+import Skeleton, { SkeletonRow } from '../../components/Skeleton'
 
 function isToday(dateStr: string) {
   const d = new Date(dateStr)
@@ -50,158 +57,290 @@ function calcStreak(sessions: GymSession[]) {
 export default function CheckInScreen() {
   const [sessions, setSessions] = useState<GymSession[]>([])
   const [loading, setLoading] = useState(true)
-  const [selectedType, setSelectedType] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
   const [checkInLoading, setCheckInLoading] = useState(false)
   const [profileId, setProfileId] = useState<string | null>(null)
-  const successAnim = useRef(new Animated.Value(0)).current
-  const scaleAnim = useRef(new Animated.Value(1)).current
+  const ctaScale = useRef(new Animated.Value(1)).current
+  const firePulse = useRef(new Animated.Value(1)).current
 
-  useEffect(() => { loadData() }, [])
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(firePulse, { toValue: 1.15, duration: 800, useNativeDriver: true }),
+        Animated.timing(firePulse, { toValue: 1, duration: 800, useNativeDriver: true }),
+      ])
+    )
+    loop.start()
+    return () => loop.stop()
+  }, [firePulse])
 
-  async function loadData() {
-    setLoading(true)
+  const loadData = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true)
+    else setLoading(true)
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return
+      if (DEV_MODE) {
+        const prof = await getDevProfile()
+        setProfileId(prof.id)
+        setSessions(mockGymSessions.slice(0, 30))
+      } else {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (!user) return
 
-      const { data: prof } = await supabase
-        .from('profiles').select('id').eq('user_id', user.id).maybeSingle()
-      if (!prof) return
-      setProfileId(prof.id)
+        const { data: prof } = await supabase
+          .from('profiles').select('id').eq('user_id', user.id).maybeSingle()
+        if (!prof) return
+        setProfileId(prof.id)
 
-      const { data: sess } = await supabase
-        .from('gym_sessions')
-        .select('*')
-        .eq('profile_id', prof.id)
-        .order('checked_in_at', { ascending: false })
-        .limit(20)
+        const { data: sess } = await supabase
+          .from('gym_sessions')
+          .select('*')
+          .eq('profile_id', prof.id)
+          .order('checked_in_at', { ascending: false })
+          .limit(30)
 
-      setSessions(sess ?? [])
+        setSessions(sess ?? [])
+      }
     } catch (e: any) {
       Alert.alert('Error', e.message)
     }
     setLoading(false)
-  }
+    setRefreshing(false)
+  }, [])
 
-  async function handleCheckIn() {
-    if (!selectedType) {
-      Alert.alert('Select type', 'Pick a workout type first')
-      return
-    }
-    if (!profileId) return
+  useFocusEffect(useCallback(() => { loadData() }, [loadData]))
 
+  /** One-tap check-in — no picker, `workout_type: null`. Can be tagged after. */
+  async function instantCheckIn() {
+    if (!profileId || checkInLoading) return
     setCheckInLoading(true)
+
+    Animated.sequence([
+      Animated.timing(ctaScale, { toValue: 1.05, duration: 120, useNativeDriver: true }),
+      Animated.spring(ctaScale, { toValue: 1, friction: 4, useNativeDriver: true }),
+    ]).start()
+
     try {
-      const { error } = await supabase.from('gym_sessions').insert({
-        profile_id: profileId,
-        workout_type: selectedType,
-        checked_in_at: new Date().toISOString(),
-      })
+      if (DEV_MODE) {
+        setSessions(prev => [
+          {
+            id: `mock-sess-${Date.now()}`,
+            profile_id: profileId,
+            checked_in_at: new Date().toISOString(),
+            workout_type: null,
+          },
+          ...prev,
+        ])
+        setCheckInLoading(false)
+        return
+      }
+
+      const { data, error } = await supabase
+        .from('gym_sessions')
+        .insert({
+          profile_id: profileId,
+          workout_type: null,
+          checked_in_at: new Date().toISOString(),
+        })
+        .select()
+        .single()
       if (error) throw error
-
-      Animated.sequence([
-        Animated.spring(scaleAnim, { toValue: 1.1, useNativeDriver: true, friction: 3 }),
-        Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, friction: 3 }),
-      ]).start()
-
-      Animated.sequence([
-        Animated.timing(successAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-        Animated.delay(3000),
-        Animated.timing(successAnim, { toValue: 0, duration: 400, useNativeDriver: true }),
-      ]).start()
-
-      setSelectedType('')
-      await loadData()
+      setSessions(prev => [data as GymSession, ...prev])
     } catch (e: any) {
       Alert.alert('Error', e.message)
     }
     setCheckInLoading(false)
   }
 
+  /** Tag today's latest session with a workout type. Tap the active one again to clear. */
+  async function tagTodayWorkout(type: string) {
+    const todaySession = sessions.find(s => isToday(s.checked_in_at))
+    if (!todaySession) return
+    const nextType = todaySession.workout_type === type ? null : type
+
+    setSessions(prev =>
+      prev.map(s => (s.id === todaySession.id ? { ...s, workout_type: nextType } : s))
+    )
+    if (DEV_MODE) return
+    try {
+      await supabase
+        .from('gym_sessions')
+        .update({ workout_type: nextType })
+        .eq('id', todaySession.id)
+    } catch {
+      // best-effort
+    }
+  }
+
   const checkedInToday = sessions.some(s => isToday(s.checked_in_at))
   const streak = calcStreak(sessions)
-  const recent = sessions.slice(0, 7)
+  const todayType = sessions.find(s => isToday(s.checked_in_at))?.workout_type ?? null
+  const recent = sessions.slice(0, 8)
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.skeletonWrap}>
+          <SkeletonRow style={{ alignItems: 'center', justifyContent: 'space-between' }}>
+            <Skeleton width="55%" height={22} borderRadius={6} />
+            <Skeleton width={64} height={28} borderRadius={14} />
+          </SkeletonRow>
+          <Skeleton height={80} borderRadius={20} style={{ marginTop: 24 }} />
+          <Skeleton height={18} width="40%" borderRadius={6} style={{ marginTop: 28 }} />
+          <Skeleton height={120} borderRadius={16} style={{ marginTop: 12 }} />
+          <Skeleton height={18} width="40%" borderRadius={6} style={{ marginTop: 24 }} />
+          <Skeleton height={160} borderRadius={16} style={{ marginTop: 12 }} />
+        </View>
+      </SafeAreaView>
+    )
+  }
 
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => loadData(true)}
+            tintColor={colors.primary}
+            colors={[colors.primary]}
+          />
+        }
       >
-        <View style={styles.heroSection}>
-          <Text style={styles.heroTitle}>ARE YOU AT{'\n'}THE GYM?</Text>
-          <Animated.Text style={[styles.streakText, { transform: [{ scale: scaleAnim }] }]}>
-            🔥 {streak} day streak
-          </Animated.Text>
+        {/* Compact header: date + streak badge */}
+        <View style={styles.heroHeader}>
+          <View>
+            <Text style={styles.heroDate}>
+              {new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' })}
+            </Text>
+            <Text style={styles.heroSub}>
+              {checkedInToday ? 'You showed up today.' : 'Hit the gym today?'}
+            </Text>
+          </View>
+          <View style={styles.streakBadge}>
+            <Text style={styles.streakBadgeNum}>{streak}</Text>
+            <Text style={styles.streakBadgeFire}>🔥</Text>
+          </View>
         </View>
 
-        {/* Success banner */}
-        <Animated.View style={[styles.successBanner, { opacity: successAnim }]}>
-          <Text style={styles.successText}>🎉 Session logged! Keep crushing it!</Text>
-        </Animated.View>
-
         {checkedInToday ? (
-          <Card style={styles.doneCard}>
-            <Text style={styles.doneEmoji}>✅</Text>
-            <Text style={styles.doneTitle}>Already logged today!</Text>
-            <Text style={styles.doneSub}>Come back tomorrow to keep your streak 🔥</Text>
-          </Card>
-        ) : (
           <>
-            {/* Workout type selection */}
-            <Text style={styles.pickLabel}>What are you training?</Text>
-            <View style={styles.workoutGrid}>
-              {CHECKIN_WORKOUT_TYPES.map(w => (
-                <TouchableOpacity
-                  key={w}
-                  style={[styles.workoutBtn, selectedType === w && styles.workoutBtnActive]}
-                  onPress={() => setSelectedType(selectedType === w ? '' : w)}
-                  activeOpacity={0.7}
+            {/* Showed-up card — mirrors the dashboard after-check-in state. */}
+            <View style={styles.checkedInWrap}>
+              <View style={styles.checkedInCard}>
+                <Animated.Text
+                  style={[styles.checkedInFire, { transform: [{ scale: firePulse }] }]}
                 >
-                  <Text style={[styles.workoutText, selectedType === w && styles.workoutTextActive]}>
-                    {w}
+                  🔥
+                </Animated.Text>
+                <View style={styles.checkedInTextCol}>
+                  <Text style={styles.checkedInTitle}>
+                    Day {streak} — You showed up.
                   </Text>
-                </TouchableOpacity>
-              ))}
+                  <Text style={styles.checkedInItalic}>
+                    That's what separates you.
+                  </Text>
+                </View>
+                <View style={styles.checkedInStreakCol}>
+                  <Text style={styles.checkedInStreakNum}>{streak}</Text>
+                  <Text style={styles.checkedInStreakLabel}>day streak</Text>
+                </View>
+              </View>
+              <Text style={styles.checkedInNext}>
+                Next check-in available tomorrow
+              </Text>
             </View>
 
-            {/* Big CTA */}
-            <TouchableOpacity
-              style={[
-                styles.bigBtn,
-                !selectedType && styles.bigBtnDisabled,
-              ]}
-              onPress={handleCheckIn}
-              disabled={checkInLoading || !selectedType}
-              activeOpacity={0.85}
+            {/* Optional workout tagging (can change anytime today). */}
+            <Text style={styles.workoutTagSectionLabel}>Tag today's workout</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.tagRow}
             >
-              {checkInLoading ? (
-                <Text style={styles.bigBtnText}>Logging...</Text>
-              ) : (
-                <Text style={styles.bigBtnText}>I'M HERE 💪</Text>
-              )}
-            </TouchableOpacity>
+              {CHECKIN_WORKOUT_TYPES.map(w => {
+                const meta = CHECKIN_WORKOUT_META[w] ?? { emoji: '🎯', color: colors.primary }
+                const active = todayType === w
+                return (
+                  <TouchableOpacity
+                    key={w}
+                    onPress={() => tagTodayWorkout(w)}
+                    activeOpacity={0.8}
+                    style={[
+                      styles.tagPill,
+                      active && { borderColor: meta.color, backgroundColor: `${meta.color}22` },
+                    ]}
+                  >
+                    <Text style={styles.tagEmoji}>{meta.emoji}</Text>
+                    <Text
+                      style={[styles.tagText, active && { color: meta.color }]}
+                      numberOfLines={1}
+                    >
+                      {w}
+                    </Text>
+                  </TouchableOpacity>
+                )
+              })}
+            </ScrollView>
           </>
+        ) : (
+          <Animated.View style={{ transform: [{ scale: ctaScale }] }}>
+            <TouchableOpacity
+              onPress={instantCheckIn}
+              disabled={checkInLoading}
+              activeOpacity={0.9}
+              style={styles.hereBtnTouch}
+            >
+              <LinearGradient
+                colors={[...gradients.primary]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.hereBtnGradient}
+              >
+                <Text style={styles.hereBtnText}>
+                  {checkInLoading ? 'LOGGING…' : "I'M HERE 💪"}
+                </Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </Animated.View>
         )}
+
+        {/* Activity grid */}
+        <Text style={styles.sectionTitle}>This month</Text>
+        <Card>
+          <Heatmap sessions={sessions} weeks={5} />
+        </Card>
 
         {/* Recent sessions */}
         {recent.length > 0 && (
           <>
-            <Text style={styles.recentTitle}>Recent Sessions</Text>
+            <Text style={styles.sectionTitle}>Recent sessions</Text>
             <Card>
-              {recent.map((s, i) => (
-                <View key={s.id} style={[styles.sessionRow, i < recent.length - 1 && styles.sessionDivider]}>
-                  <View>
-                    <Text style={styles.sessionType}>{s.workout_type ?? 'Session'}</Text>
-                    <Text style={styles.sessionTime}>{timeAgo(s.checked_in_at)}</Text>
-                  </View>
-                  {isToday(s.checked_in_at) && (
-                    <View style={styles.todayBadge}>
-                      <Text style={styles.todayBadgeText}>Today</Text>
+              {recent.map((s, i) => {
+                const key = s.workout_type ?? 'Other'
+                const meta = CHECKIN_WORKOUT_META[key] ?? {
+                  emoji: '🎯',
+                  color: colors.muted,
+                }
+                return (
+                  <View
+                    key={s.id}
+                    style={[styles.sessionRow, i < recent.length - 1 && styles.sessionDivider]}
+                  >
+                    <View style={[styles.sessionDot, { backgroundColor: meta.color }]} />
+                    <Text style={styles.sessionEmoji}>{meta.emoji}</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.sessionType}>
+                        {s.workout_type ?? 'Untagged'}
+                      </Text>
+                      <Text style={styles.sessionTime}>
+                        {timeAgo(s.checked_in_at)}
+                      </Text>
                     </View>
-                  )}
-                </View>
-              ))}
+                  </View>
+                )
+              })}
             </Card>
           </>
         )}
@@ -214,129 +353,229 @@ export default function CheckInScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
-  scroll: { paddingHorizontal: spacing.xl, paddingBottom: 24 },
-  heroSection: {
-    alignItems: 'center',
-    paddingVertical: spacing.xxxl,
+  skeletonWrap: {
+    flex: 1,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xl,
+    gap: 0,
   },
-  heroTitle: {
-    fontSize: 44,
+  scroll: { paddingHorizontal: spacing.xl, paddingBottom: 24 },
+
+  heroHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.lg,
+  },
+  heroDate: {
+    fontSize: 16,
+    lineHeight: lineHeightFor(16),
     fontFamily: F.extraBold,
     color: colors.text,
-    textAlign: 'center',
-    letterSpacing: -2,
-    lineHeight: 52,
-    marginBottom: spacing.md,
+    letterSpacing: -0.3,
   },
-  streakText: {
-    fontSize: 22,
-    fontFamily: F.extraBold,
-    color: colors.primary,
-  },
-  successBanner: {
-    backgroundColor: 'rgba(52,211,153,0.12)',
-    borderRadius: radius.lg,
-    padding: spacing.md,
-    alignItems: 'center',
-    marginBottom: spacing.lg,
-    borderWidth: 1,
-    borderColor: 'rgba(52,211,153,0.3)',
-  },
-  successText: {
-    color: '#34d399',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  doneCard: {
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: spacing.xl,
-    backgroundColor: 'rgba(52,211,153,0.08)',
-    borderColor: 'rgba(52,211,153,0.3)',
-  },
-  doneEmoji: { fontSize: 48 },
-  doneTitle: {
-    fontSize: 22,
-    fontFamily: F.extraBold,
-    color: '#34d399',
-  },
-  doneSub: {
-    fontSize: 14,
+  heroSub: {
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
     fontFamily: F.regular,
     color: colors.muted,
-    textAlign: 'center',
+    marginTop: 3,
   },
-  pickLabel: {
-    fontSize: 16,
-    fontFamily: F.bold,
-    color: colors.text,
-    marginBottom: spacing.md,
-  },
-  workoutGrid: {
+  streakBadge: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,87,34,0.12)',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,87,34,0.25)',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  streakBadgeNum: {
+    fontSize: 18,
+    lineHeight: lineHeightFor(18),
+    fontFamily: F.extraBold,
+    color: colors.primary,
+    letterSpacing: -0.5,
+  },
+  streakBadgeFire: {
+    fontSize: 16,
+    lineHeight: 20,
+  },
+
+  // Giant "I'M HERE 💪" button when not yet checked in.
+  hereBtnTouch: {
+    height: 80,
+    borderRadius: 20,
+    overflow: 'visible',
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.55,
+    shadowRadius: 22,
+    elevation: 16,
     marginBottom: spacing.xl,
   },
-  workoutBtn: {
-    paddingHorizontal: 18,
-    paddingVertical: 11,
+  hereBtnGradient: {
+    flex: 1,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  hereBtnText: {
+    fontSize: 24,
+    lineHeight: lineHeightFor(24),
+    fontFamily: F.extraBold,
+    fontWeight: '900',
+    color: colors.text,
+    letterSpacing: 1.5,
+  },
+
+  // Checked-in card (same vocabulary as dashboard).
+  checkedInWrap: {
+    marginBottom: spacing.lg,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 24,
+    elevation: 16,
+  },
+  checkedInCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,87,34,0.55)',
+    paddingVertical: 18,
+    paddingHorizontal: 16,
+    gap: 14,
+  },
+  checkedInFire: {
+    fontSize: 40,
+    lineHeight: 46,
+  },
+  checkedInTextCol: { flex: 1 },
+  checkedInTitle: {
+    fontSize: 18,
+    lineHeight: lineHeightFor(18),
+    fontFamily: F.extraBold,
+    fontWeight: '900',
+    color: colors.text,
+    letterSpacing: -0.3,
+  },
+  checkedInItalic: {
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.regular,
+    color: colors.muted,
+    fontStyle: 'italic',
+    marginTop: 2,
+  },
+  checkedInStreakCol: {
+    alignItems: 'center',
+    minWidth: 52,
+  },
+  checkedInStreakNum: {
+    fontSize: 34,
+    lineHeight: 38,
+    fontFamily: F.extraBold,
+    fontWeight: '900',
+    color: colors.primary,
+    letterSpacing: -1,
+  },
+  checkedInStreakLabel: {
+    fontSize: 9,
+    lineHeight: 11,
+    fontFamily: F.bold,
+    color: colors.primary,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginTop: 2,
+  },
+  checkedInNext: {
+    fontSize: 11,
+    lineHeight: lineHeightFor(11),
+    fontFamily: F.regular,
+    color: colors.muted,
+    marginTop: 10,
+    marginLeft: 4,
+  },
+
+  workoutTagSectionLabel: {
+    fontSize: 14,
+    lineHeight: lineHeightFor(14),
+    fontFamily: F.bold,
+    color: colors.text,
+    marginBottom: spacing.sm,
+  },
+  tagRow: {
+    gap: 8,
+    paddingRight: spacing.xl,
+    paddingVertical: 2,
+    marginBottom: spacing.md,
+  },
+  tagPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: radius.full,
     backgroundColor: colors.surface,
     borderWidth: 1.5,
     borderColor: colors.border,
   },
-  workoutBtnActive: {
-    backgroundColor: 'rgba(255,107,0,0.15)',
-    borderColor: colors.primary,
+  tagEmoji: { fontSize: 15, lineHeight: 18 },
+  tagText: {
+    fontSize: 12,
+    lineHeight: lineHeightFor(12),
+    fontFamily: F.semiBold,
+    color: colors.muted,
   },
-  workoutText: { fontSize: 14, fontFamily: F.bold, color: colors.muted },
-  workoutTextActive: { color: colors.primary },
-  bigBtn: {
-    height: 72,
-    backgroundColor: colors.primary,
-    borderRadius: radius.xl,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: spacing.xl,
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.5,
-    shadowRadius: 20,
-    elevation: 12,
-  },
-  bigBtnDisabled: { opacity: 0.4, shadowOpacity: 0 },
-  bigBtnText: {
-    fontSize: 22,
-    fontFamily: F.extraBold,
-    color: colors.text,
-    letterSpacing: 1,
-  },
-  recentTitle: {
+
+  sectionTitle: {
     fontSize: 18,
+    lineHeight: lineHeightFor(18),
     fontFamily: F.extraBold,
     color: colors.text,
+    marginTop: spacing.xl,
     marginBottom: spacing.md,
+    letterSpacing: -0.3,
   },
+
   sessionRow: {
     paddingVertical: 12,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: 10,
   },
   sessionDivider: {
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
-  sessionType: { fontSize: 15, fontFamily: F.bold, color: colors.text },
-  sessionTime: { fontSize: 12, fontFamily: F.regular, color: colors.muted, marginTop: 2 },
-  todayBadge: {
-    backgroundColor: 'rgba(52,211,153,0.15)',
-    borderRadius: radius.full,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderWidth: 1,
-    borderColor: 'rgba(52,211,153,0.3)',
+  sessionDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
   },
-  todayBadgeText: { fontSize: 11, color: '#34d399', fontWeight: '700' },
+  sessionEmoji: {
+    fontSize: 18,
+    lineHeight: 22,
+    marginRight: 2,
+  },
+  sessionType: {
+    fontSize: 15,
+    lineHeight: lineHeightFor(15),
+    fontFamily: F.bold,
+    color: colors.text,
+  },
+  sessionTime: {
+    fontSize: 12,
+    lineHeight: lineHeightFor(12),
+    fontFamily: F.regular,
+    color: colors.muted,
+    marginTop: 2,
+  },
 })

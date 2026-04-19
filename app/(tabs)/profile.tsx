@@ -1,16 +1,24 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
+import { useFocusEffect } from '@react-navigation/native'
 import {
   View, Text, TouchableOpacity, StyleSheet, Alert, ScrollView, Share,
+  RefreshControl, useWindowDimensions,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { LinearGradient } from 'expo-linear-gradient'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useRouter } from 'expo-router'
 import { supabase } from '../../lib/supabase'
 import Avatar from '../../components/Avatar'
+import ProBadge from '../../components/ProBadge'
 import Card from '../../components/Card'
-import GradientButton from '../../components/GradientButton'
+import Heatmap from '../../components/Heatmap'
 import { Profile, GymSession } from '../../lib/types'
 import { SPORTS } from '../../constants/data'
-import { colors, spacing, radius, vibeTagColors, F } from '../../constants/theme'
+import { colors, spacing, radius, vibeTagColors, F, lineHeightFor, profileHeroGradient } from '../../constants/theme'
+import { DEV_MODE } from '../../lib/devMode'
+import { getDevProfile } from '../../lib/devMockProfile'
+import { mockGymSessions } from '../../lib/mockData'
+import Skeleton, { SkeletonRow } from '../../components/Skeleton'
 
 const WEB = 'https://gymcrush-one.vercel.app'
 
@@ -36,31 +44,58 @@ function calcStreak(sessions: GymSession[]) {
 }
 
 export default function ProfileScreen() {
+  const { height: windowHeight } = useWindowDimensions()
+  const insets = useSafeAreaInsets()
+  const heroHeight = windowHeight * 0.5
   const router = useRouter()
   const [profile, setProfile] = useState<Profile | null>(null)
   const [sessions, setSessions] = useState<GymSession[]>([])
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
 
-  useEffect(() => { loadData() }, [])
-
-  async function loadData() {
-    setLoading(true)
+  const loadData = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true)
+    else setLoading(true)
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return
-      const [{ data: prof }, { data: sess }] = await Promise.all([
-        supabase.from('profiles').select('*').eq('user_id', user.id).maybeSingle(),
-        supabase.from('gym_sessions').select('*').eq('profile_id', user.id).order('checked_in_at', { ascending: false }),
-      ])
-      setProfile(prof)
-      setSessions(sess ?? [])
+      if (DEV_MODE) {
+        const prof = await getDevProfile()
+        setProfile(prof)
+        setSessions(mockGymSessions)
+      } else {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (!user) return
+        const { data: prof } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('user_id', user.id)
+          .maybeSingle()
+        if (!prof) return
+        const { data: sess } = await supabase
+          .from('gym_sessions')
+          .select('*')
+          .eq('profile_id', prof.id)
+          .order('checked_in_at', { ascending: false })
+        setProfile(prof)
+        setSessions(sess ?? [])
+      }
     } catch (e: any) {
       Alert.alert('Error', e.message)
     }
     setLoading(false)
-  }
+    setRefreshing(false)
+  }, [])
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadData(false)
+    }, [loadData])
+  )
 
   async function handleSignOut() {
+    if (DEV_MODE) {
+      Alert.alert('Dev mode', 'Sign out is disabled while DEV_MODE is on.')
+      return
+    }
     Alert.alert('Sign out', 'Are you sure?', [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -86,8 +121,19 @@ export default function ProfileScreen() {
 
   if (loading || !profile) {
     return (
-      <SafeAreaView style={styles.container}>
-        <Text style={styles.loadingText}>Loading...</Text>
+      <SafeAreaView style={styles.container} edges={['bottom']}>
+        <Skeleton height={windowHeight * 0.5} borderRadius={0} />
+        <View style={{ padding: 20, gap: 14 }}>
+          <Skeleton width={120} height={18} borderRadius={6} />
+          <Skeleton width="60%" height={14} borderRadius={6} />
+          <SkeletonRow gap={10} style={{ marginTop: 4 }}>
+            <Skeleton width={80} height={28} borderRadius={14} />
+            <Skeleton width={80} height={28} borderRadius={14} />
+            <Skeleton width={80} height={28} borderRadius={14} />
+          </SkeletonRow>
+          <Skeleton height={140} borderRadius={16} style={{ marginTop: 8 }} />
+          <Skeleton height={100} borderRadius={16} />
+        </View>
       </SafeAreaView>
     )
   }
@@ -96,46 +142,64 @@ export default function ProfileScreen() {
   const sport = SPORTS.find(s => s.id === profile.sport)
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['bottom']}>
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
+        contentInsetAdjustmentBehavior="never"
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => loadData(true)}
+            tintColor={colors.primary}
+            colors={[colors.primary]}
+          />
+        }
       >
-        {/* Action bar */}
-        <View style={styles.actionBar}>
-          <TouchableOpacity
-            style={styles.actionBtn}
-            onPress={() => router.push('/(onboarding)/create')}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.actionBtnText}>✏️ Edit Profile</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.actionBtn}
-            onPress={handleShare}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.actionBtnText}>📤 Share</Text>
-          </TouchableOpacity>
+        {/* Top half: edge-to-edge gradient (under status bar); avatar inset below notch */}
+        <View style={[styles.heroSection, { height: heroHeight }]}>
+          <LinearGradient
+            {...profileHeroGradient}
+            style={StyleSheet.absoluteFillObject}
+          />
+          <View style={[styles.heroAvatarBlock, { paddingTop: insets.top }]}>
+            <Avatar photoUrl={profile.photo_url} name={profile.display_name} size={120} />
+          </View>
         </View>
 
-        {/* Avatar + name */}
-        <View style={styles.hero}>
-          <Avatar photoUrl={profile.photo_url} name={profile.display_name} size={96} />
-          <View style={styles.heroInfo}>
-            <Text style={styles.name}>{profile.display_name}</Text>
-            {profile.is_pro && (
-              <View style={styles.proBadge}>
-                <Text style={styles.proText}>⚡ Pro</Text>
-              </View>
-            )}
-            {(profile.age || profile.gym_name) ? (
+        <View style={styles.body}>
+          {/* Action bar */}
+          <View style={styles.actionBar}>
+            <TouchableOpacity
+              style={styles.actionBtn}
+              onPress={() => router.push('/(onboarding)/create')}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.actionBtnText}>✏️ Edit Profile</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.actionBtn}
+              onPress={handleShare}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.actionBtnText}>📤 Share</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.identity}>
+            <View style={styles.nameRow}>
+              <Text style={styles.name}>{profile.display_name}</Text>
+              {profile.is_pro && <ProBadge />}
+            </View>
+            {(profile.age != null || profile.gym_name) ? (
               <Text style={styles.meta}>
-                {[profile.age, profile.gym_name].filter(Boolean).join(' · ')}
+                {[
+                  profile.age != null ? `${profile.age}` : null,
+                  profile.gym_name,
+                ].filter(Boolean).join(' · ')}
               </Text>
             ) : null}
           </View>
-        </View>
 
         {/* Stats pills */}
         <View style={styles.statsPills}>
@@ -144,26 +208,34 @@ export default function ProfileScreen() {
           <View style={styles.statPill}><Text style={styles.statPillText}>👋 {profile.wave_count} waves</Text></View>
         </View>
 
-        {/* Sport / goal / style */}
+        {/* Sport (outline) + goal (filled) — web reference */}
         {(sport || profile.goal || profile.workout_style) && (
           <View style={styles.pillsRow}>
             {sport && (
-              <View style={styles.orangePill}>
-                <Text style={styles.orangePillText}>{sport.emoji} {sport.id}</Text>
+              <View style={styles.tagOutline}>
+                <Text style={styles.tagOutlineText}>{sport.id}</Text>
               </View>
             )}
             {profile.goal && (
-              <View style={styles.orangePill}>
-                <Text style={styles.orangePillText}>🎯 {profile.goal}</Text>
+              <View style={styles.tagFilled}>
+                <Text style={styles.tagFilledText}>{profile.goal}</Text>
               </View>
             )}
             {profile.workout_style && (
-              <View style={styles.orangePill}>
-                <Text style={styles.orangePillText}>⚡ {profile.workout_style}</Text>
+              <View style={styles.tagFilled}>
+                <Text style={styles.tagFilledText}>{profile.workout_style}</Text>
               </View>
             )}
           </View>
         )}
+
+        {/* Activity heatmap */}
+        <Card style={styles.section}>
+          <Text style={styles.sectionLabel}>ACTIVITY</Text>
+          <View style={{ marginTop: 10 }}>
+            <Heatmap sessions={sessions} weeks={13} />
+          </View>
+        </Card>
 
         {/* Vibe tags */}
         {profile.vibe_tags && profile.vibe_tags.length > 0 && (
@@ -182,12 +254,9 @@ export default function ProfileScreen() {
           </Card>
         )}
 
-        {/* Bio */}
+        {/* Bio — centered copy like web */}
         {profile.bio && (
-          <Card style={styles.section}>
-            <Text style={styles.sectionLabel}>BIO</Text>
-            <Text style={styles.bioText}>{profile.bio}</Text>
-          </Card>
+          <Text style={styles.bioStandalone}>{profile.bio}</Text>
         )}
 
         {/* Training schedule */}
@@ -229,6 +298,7 @@ export default function ProfileScreen() {
         >
           <Text style={styles.signOutText}>Sign Out</Text>
         </TouchableOpacity>
+        </View>
 
         <View style={{ height: spacing.xxl }} />
       </ScrollView>
@@ -238,8 +308,34 @@ export default function ProfileScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
-  loadingText: { color: colors.muted, textAlign: 'center', marginTop: 100, fontFamily: F.regular },
-  scroll: { paddingHorizontal: spacing.xl, paddingBottom: 24 },
+  loadingText: { color: colors.muted, textAlign: 'center', marginTop: 100, fontSize: 16, lineHeight: lineHeightFor(16), fontFamily: F.regular },
+  scroll: { paddingBottom: 24 },
+  heroSection: {
+    width: '100%',
+    position: 'relative',
+    overflow: 'hidden',
+    backgroundColor: '#000000',
+  },
+  heroAvatarBlock: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  body: {
+    paddingHorizontal: spacing.xl,
+  },
+  identity: {
+    alignItems: 'center',
+    marginBottom: spacing.md,
+    gap: 8,
+  },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
   actionBar: {
     flexDirection: 'row',
     gap: spacing.sm,
@@ -255,36 +351,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
-  actionBtnText: { color: colors.text, fontSize: 13, fontFamily: F.bold },
-  hero: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.lg,
-    paddingVertical: spacing.lg,
-  },
-  heroInfo: { flex: 1, gap: 6 },
+  actionBtnText: { color: colors.text, fontSize: 13, lineHeight: lineHeightFor(13), fontFamily: F.bold },
   name: {
-    fontSize: 26,
+    fontSize: 24,
+    lineHeight: lineHeightFor(24),
     fontFamily: F.extraBold,
     color: colors.text,
     letterSpacing: -0.5,
+    textAlign: 'center',
   },
-  proBadge: {
-    alignSelf: 'flex-start',
-    backgroundColor: 'rgba(255,107,0,0.15)',
-    borderRadius: radius.full,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderWidth: 1,
-    borderColor: 'rgba(255,107,0,0.4)',
-  },
-  proText: { fontSize: 12, fontFamily: F.bold, color: colors.primary },
-  meta: { fontSize: 14, fontFamily: F.regular, color: colors.muted },
+  meta: { fontSize: 14, lineHeight: lineHeightFor(14), fontFamily: F.regular, color: colors.muted, textAlign: 'center' },
   statsPills: {
     flexDirection: 'row',
     gap: spacing.sm,
     marginBottom: spacing.md,
     flexWrap: 'wrap',
+    justifyContent: 'center',
   },
   statPill: {
     paddingHorizontal: 12,
@@ -294,29 +376,58 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     backgroundColor: colors.surface,
   },
-  statPillText: { fontSize: 12, fontFamily: F.semiBold, color: colors.muted },
+  statPillText: { fontSize: 12, lineHeight: lineHeightFor(12), fontFamily: F.semiBold, color: colors.muted },
   pillsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
     marginBottom: spacing.md,
+    justifyContent: 'center',
   },
-  orangePill: {
-    paddingHorizontal: 12,
+  tagOutline: {
+    paddingHorizontal: 14,
     paddingVertical: 7,
     borderRadius: radius.full,
-    backgroundColor: 'rgba(255,107,0,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,107,0,0.3)',
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    backgroundColor: 'transparent',
   },
-  orangePillText: { fontSize: 13, fontFamily: F.semiBold, color: colors.primary },
+  tagOutlineText: {
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.semiBold,
+    color: colors.primary,
+  },
+  tagFilled: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface2,
+  },
+  tagFilledText: {
+    fontSize: 13,
+    lineHeight: lineHeightFor(13),
+    fontFamily: F.semiBold,
+    color: colors.muted,
+  },
+  bioStandalone: {
+    fontSize: 15,
+    lineHeight: lineHeightFor(15),
+    fontFamily: F.regular,
+    color: colors.text,
+    textAlign: 'center',
+    marginBottom: spacing.lg,
+    paddingHorizontal: spacing.sm,
+  },
   section: { marginBottom: spacing.md },
   sectionLabel: {
     fontSize: 11,
+    lineHeight: lineHeightFor(11),
     fontFamily: F.bold,
     color: colors.muted,
     letterSpacing: 1,
-    marginBottom: spacing.sm,
     textTransform: 'uppercase',
   },
   vibePills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
@@ -326,8 +437,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderWidth: 1.5,
   },
-  vibePillText: { fontSize: 12, fontFamily: F.semiBold },
-  bioText: { fontSize: 15, fontFamily: F.regular, color: colors.text, lineHeight: 22 },
+  vibePillText: { fontSize: 12, lineHeight: lineHeightFor(12), fontFamily: F.semiBold },
   daysRow: { flexDirection: 'row', gap: 4, marginBottom: spacing.sm },
   dayBtn: {
     flex: 1,
@@ -340,13 +450,13 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   dayBtnActive: {
-    backgroundColor: 'rgba(255,107,0,0.15)',
+    backgroundColor: 'rgba(255,87,34,0.15)',
     borderColor: colors.primary,
   },
-  dayText: { fontSize: 10, fontFamily: F.bold, color: colors.muted },
+  dayText: { fontSize: 10, lineHeight: lineHeightFor(10), fontFamily: F.bold, color: colors.muted },
   dayTextActive: { color: colors.primary },
-  timeText: { fontSize: 13, fontFamily: F.regular, color: colors.muted },
-  instaText: { fontSize: 14, fontFamily: F.semiBold, color: colors.text },
+  timeText: { fontSize: 13, lineHeight: lineHeightFor(13), fontFamily: F.regular, color: colors.muted },
+  instaText: { fontSize: 14, lineHeight: lineHeightFor(14), fontFamily: F.semiBold, color: colors.text },
   signOutBtn: {
     height: 52,
     alignItems: 'center',
@@ -355,6 +465,7 @@ const styles = StyleSheet.create({
   },
   signOutText: {
     fontSize: 16,
+    lineHeight: lineHeightFor(16),
     fontFamily: F.bold,
     color: '#FF3D6B',
   },

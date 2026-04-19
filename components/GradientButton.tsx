@@ -1,7 +1,7 @@
 import React from 'react'
 import { TouchableOpacity, Text, ActivityIndicator, StyleSheet } from 'react-native'
 import { LinearGradient } from 'expo-linear-gradient'
-import { F } from '../constants/theme'
+import { F, lineHeightFor } from '../constants/theme'
 
 interface Props {
   label: string
@@ -22,7 +22,7 @@ export default function GradientButton({
       style={[styles.wrapper, (disabled || loading) && styles.disabled]}
     >
       <LinearGradient
-        colors={['#FF6B00', '#FF3D6B']}
+        colors={['#FF5722', '#FF3D6B']}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 0 }}
         style={[styles.button, small && styles.small]}
@@ -40,7 +40,7 @@ const styles = StyleSheet.create({
   wrapper: {
     borderRadius: 16,
     overflow: 'hidden',
-    shadowColor: '#FF6B00',
+    shadowColor: '#FF5722',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.4,
     shadowRadius: 20,
@@ -55,6 +55,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
   small: { height: 44 },
-  label: { color: '#fff', fontSize: 17, fontFamily: F.bold },
-  labelSmall: { fontSize: 14 },
+  label: { color: '#fff', fontSize: 17, lineHeight: lineHeightFor(17), fontFamily: F.bold },
+  labelSmall: { fontSize: 14, lineHeight: lineHeightFor(14) },
 })

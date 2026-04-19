@@ -3,7 +3,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { useRouter } from 'expo-router'
 import GCLogo from '../components/GCLogo'
 import GradientButton from '../components/GradientButton'
-import { colors, spacing, radius, F } from '../constants/theme'
+import { colors, spacing, radius, F, lineHeightFor } from '../constants/theme'
 
 export default function WelcomeScreen() {
   const router = useRouter()
@@ -69,17 +69,19 @@ const styles = StyleSheet.create({
     width: 300,
     height: 300,
     borderRadius: 150,
-    backgroundColor: 'rgba(255, 107, 0, 0.08)',
+    backgroundColor: 'rgba(255, 87, 34, 0.08)',
     top: -100,
   },
   appName: {
     fontSize: 30,
+    lineHeight: lineHeightFor(30),
     fontFamily: F.extraBold,
     color: colors.text,
     letterSpacing: -1,
   },
   tagline: {
     fontSize: 16,
+    lineHeight: lineHeightFor(16),
     fontFamily: F.regular,
     color: colors.muted,
   },
@@ -90,9 +92,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: 'rgba(255,107,0,0.1)',
+    backgroundColor: 'rgba(255,87,34,0.1)',
     borderWidth: 1,
-    borderColor: 'rgba(255,107,0,0.3)',
+    borderColor: 'rgba(255,87,34,0.3)',
     borderRadius: radius.full,
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -107,6 +109,7 @@ const styles = StyleSheet.create({
   pillText: {
     color: colors.text,
     fontSize: 13,
+    lineHeight: lineHeightFor(13),
     fontFamily: F.semiBold,
   },
   signInButton: {
@@ -121,6 +124,7 @@ const styles = StyleSheet.create({
   signInText: {
     color: colors.text,
     fontSize: 17,
+    lineHeight: lineHeightFor(17),
     fontFamily: F.bold,
     includeFontPadding: false,
   },

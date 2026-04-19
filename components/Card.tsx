@@ -29,7 +29,7 @@ const styles = StyleSheet.create({
     padding: 16,
   },
   glow: {
-    shadowColor: '#FF6B00',
+    shadowColor: '#FF5722',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.15,
     shadowRadius: 20,

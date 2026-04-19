@@ -1,6 +1,6 @@
 import React from 'react'
 import { TouchableOpacity, Text, StyleSheet } from 'react-native'
-import { colors, F } from '../constants/theme'
+import { colors, F, lineHeightFor } from '../constants/theme'
 
 interface ColorSet {
   bg: string
@@ -17,9 +17,9 @@ interface Props {
 }
 
 const defaultColor: ColorSet = {
-  bg: 'rgba(255,107,0,0.15)',
-  text: '#FF6B00',
-  border: 'rgba(255,107,0,0.3)',
+  bg: 'rgba(255,87,34,0.15)',
+  text: '#FF5722',
+  border: 'rgba(255,87,34,0.3)',
 }
 
 export default function PillTag({
@@ -57,6 +57,6 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
   },
   small: { paddingHorizontal: 10, paddingVertical: 5 },
-  text: { fontSize: 13, fontFamily: F.semiBold },
-  textSmall: { fontSize: 11 },
+  text: { fontSize: 13, lineHeight: lineHeightFor(13), fontFamily: F.semiBold },
+  textSmall: { fontSize: 11, lineHeight: lineHeightFor(11) },
 })
